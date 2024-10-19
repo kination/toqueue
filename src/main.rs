@@ -6,12 +6,14 @@ use serde::{Serialize, Deserialize};
 
 struct FileQueue {
     file_path: String,
+    next_item_position: u64
 }
 
 impl FileQueue {
     fn new(file_path: &str) -> Self {
         FileQueue {
             file_path: file_path.to_string(),
+            next_item_position: 0
         }
     }
 
@@ -22,67 +24,72 @@ impl FileQueue {
             .write(true)
             .open(&self.file_path)?;
 
-        file.seek(SeekFrom::End(0))?;
-        let offset = file.stream_position()?;
-        println!("write offset {}", offset);
+        if file.metadata()?.len() != 0 {
+            file.seek(SeekFrom::End(0))?;
+            let offset = file.stream_position()?;
+            println!("starting write offset {}", offset);
+        }
         
-        // Write item length and data
-        file.write_all(&(item.len() as u32).to_le_bytes())?;
-        file.write_all(item)?;
-        
-        // Update queue size
-        // let mut size = self.get_queue_size(&mut file)?;
-        // size += 1;
-
-        file.seek(SeekFrom::Start(0))?;
+        // Write header(item length)
         let item_length = item.len() as u32;
-        println!("writing length: {}", item_length);
+        println!("item length -> {}", item_length);
         file.write_all(&item_length.to_le_bytes())?;
+        // Write body(data)
+        file.write_all(item)?;
+
+        
+        let size = self.get_queue_size(&mut file)?; // Get current queue size
+        println!("item size -> {}", size);
+        file.seek(SeekFrom::Start(0))?; // Seek to the start to write the new size
+        file.write_all(&size.to_le_bytes())?; 
 
         Ok(())
     }
 
-    fn dequeue(&self) -> io::Result<Option<Vec<u8>>> {
+    fn dequeue(&mut self) -> io::Result<Option<Vec<u8>>> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(&self.file_path)?;
 
-        println!("read file");
+        println!("---- start dequeue ----");
+        println!("read file from -> {}", self.next_item_position);
         let size = self.get_queue_size(&mut file)?;
         if size == 0 {
             return Ok(None);
         }
 
-        file.seek(SeekFrom::Start(0))?; // Ensure you are at the correct position
-        let mut len_bytes = [0u8; size_of::<u32>()];
+        file.seek(SeekFrom::Start(self.next_item_position))?;
+
+        // read byte data with size of u32, which data length has been storred
+        let mut len_bytes = [0u8; std::mem::size_of::<u32>()];
         file.read_exact(&mut len_bytes)?;
-        // TODO: 4 is to go over data about item size. Need to setup appropriate value
-        let len = u32::from_le_bytes(len_bytes) as usize + 4;
-        let read_len: usize = len - 4;
+        
+        // read data length data
+        let data_len = u32::from_le_bytes(len_bytes) as usize;
+        println!("len size -> {}", data_len);
 
-        // Check if the file has enough data to read the item
-        let current_position = file.stream_position()?;
-        let remaining_bytes = file.metadata()?.len() - current_position;
-
-        if remaining_bytes < (read_len as u64) {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Not enough data to read the item"));
-        }
-
-        let mut item = vec![0u8; read_len];
+        // write the data by reading size of data_len
+        let mut item = vec![0u8; data_len];
         file.read_exact(&mut item)?;
+        println!("result item -> {}", String::from_utf8_lossy(&item));
 
-        // Update queue size and shift remaining data
-        // let new_size = size - 1;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&size.to_le_bytes())?;
-        println!("write_all");
+        // Get current position after reading the item
+        let current_position = file.stream_position()?;
+        // let remaining_bytes = file.metadata()?.len() - current_position
+        println!("current_position: {}", current_position);
+        self.next_item_position = current_position as u64;
+        // TODO: check correct value
+        // if self.next_item_position == 0 {
+        //     self.next_item_position += data_len as u64 + 1;
+        // } else {
+        //     self.next_item_position += current_position as u64 + 1;
+        // }
+        
+        println!("next_item_position: {}", self.next_item_position);
 
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)?;
-        file.set_len(size_of::<u32>() as u64 + buffer.len() as u64)?;
-        file.seek(SeekFrom::Start(size_of::<u32>() as u64))?;
-        file.write_all(&buffer[len..])?; 
+        // Seek to the next item's length
+        file.seek(SeekFrom::Start(self.next_item_position))?;
 
         Ok(Some(item))
     }
@@ -96,15 +103,14 @@ impl FileQueue {
 }
 
 
-fn main() -> Result<(), std::io::Error> { 
-    let queue: FileQueue= FileQueue::new("test_queue.bin");
-    queue.enqueue(b"Item1").unwrap();
-    queue.enqueue(b"Item2").unwrap();
-    queue.enqueue(b"Item3").unwrap();
-    // queue.dequeue().unwrap();
+fn main() -> Result<(), std::io::Error> {
+    let file_name = "test_queue.bin";
+    let mut queue: FileQueue= FileQueue::new(&file_name);
+    queue.enqueue(b"{name:Item1}").unwrap();
+    queue.enqueue(b"{name:seconditem}").unwrap();
+    queue.enqueue(b"{name:thirditem}").unwrap();
 
     println!("Enqueued 3 items");
-    // queue.dequeue().unwrap();
 
     // Dequeue and print items
     for _ in 0..3 {
@@ -114,5 +120,8 @@ fn main() -> Result<(), std::io::Error> {
         }
     }
 
+    std::fs::remove_file(file_name).unwrap();
+
     Ok(())
 }
+
